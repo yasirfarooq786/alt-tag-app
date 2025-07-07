@@ -35,8 +35,12 @@ def analyze_image_with_blip_api(image_data, custom_prompt=""):
         if not HF_API_TOKEN:
             return {"error": "Hugging Face API token not configured"}
 
-        API_URL = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-base"
-        headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
+        # Try multiple working models in order of preference
+        models_to_try = [
+            "nlpconnect/vit-gpt2-image-captioning",  # Usually more reliable
+            "Salesforce/blip-image-captioning-base",
+            "microsoft/DialoGPT-medium"
+        ]
 
         if image_data.startswith("data:image"):
             image_data_clean = image_data.split(",")[1]
@@ -53,34 +57,64 @@ def analyze_image_with_blip_api(image_data, custom_prompt=""):
         width, height = image.size
         dimensions = f"{width}x{height}"
 
-        # Call Hugging Face API
-        response = requests.post(API_URL, headers=headers, data=image_bytes, timeout=30)
-        
-        if response.status_code == 200:
-            result_data = response.json()
-            
-            # Handle different response formats
-            if isinstance(result_data, list) and len(result_data) > 0:
-                caption = result_data[0].get('generated_text', 'No caption generated')
-            elif isinstance(result_data, dict):
-                caption = result_data.get('generated_text', 'No caption generated')
-            else:
-                caption = "Unable to generate caption"
-                
-        elif response.status_code == 503:
-            return {"error": "Model is loading, please try again in a few minutes"}
-        else:
-            return {"error": f"API error: {response.status_code} - {response.text}"}
+        # Try each model until one works
+        last_error = None
+        for model_name in models_to_try:
+            try:
+                API_URL = f"https://api-inference.huggingface.co/models/{model_name}"
+                headers = {
+                    "Authorization": f"Bearer {HF_API_TOKEN}",
+                    "Content-Type": "application/octet-stream"
+                }
 
-        result = {
-            "alt_text": caption,
-            "explanation": "Generated using BLIP via Hugging Face API",
-            "success": True,
-            "dimensions": dimensions,
-            "size_kb": round(file_size_kb, 1),
-            "format": image_format
-        }
-        return result
+                print(f"Trying model: {model_name}")
+                response = requests.post(API_URL, headers=headers, data=image_bytes, timeout=30)
+                
+                print(f"Response status: {response.status_code}")
+                print(f"Response text: {response.text[:200]}...")
+                
+                if response.status_code == 200:
+                    result_data = response.json()
+                    
+                    # Handle different response formats
+                    if isinstance(result_data, list) and len(result_data) > 0:
+                        caption = result_data[0].get('generated_text', 'No caption generated')
+                    elif isinstance(result_data, dict):
+                        caption = result_data.get('generated_text', 'No caption generated')
+                    else:
+                        caption = str(result_data)
+                        
+                    # Success! Return the result
+                    return {
+                        "alt_text": caption,
+                        "explanation": f"Generated using {model_name} via Hugging Face API",
+                        "success": True,
+                        "dimensions": dimensions,
+                        "size_kb": round(file_size_kb, 1),
+                        "format": image_format,
+                        "model_used": model_name
+                    }
+                    
+                elif response.status_code == 503:
+                    last_error = f"Model {model_name} is loading, trying next model..."
+                    print(last_error)
+                    continue
+                    
+                elif response.status_code == 401:
+                    return {"error": "Invalid Hugging Face API token"}
+                    
+                else:
+                    last_error = f"Model {model_name}: {response.status_code} - {response.text}"
+                    print(last_error)
+                    continue
+                    
+            except Exception as e:
+                last_error = f"Error with model {model_name}: {str(e)}"
+                print(last_error)
+                continue
+
+        # If we get here, all models failed
+        return {"error": f"All models failed. Last error: {last_error}"}
 
     except Exception as e:
         print(f"❌ Error in BLIP API image analysis: {e}")
@@ -184,8 +218,15 @@ async def analyze_url(url, custom_prompt=""):
 
 
 def analyze_image_with_blip(image_data, custom_prompt=""):
-    # Use Hugging Face API instead of local model
-    return analyze_image_with_blip_api(image_data, custom_prompt)
+    # Try Hugging Face first, fallback to OpenAI if available
+    result = analyze_image_with_blip_api(image_data, custom_prompt)
+    
+    # If HF fails and OpenAI key is available, try OpenAI
+    if "error" in result and os.getenv("OPENAI_API_KEY"):
+        print("Hugging Face failed, trying OpenAI Vision...")
+        return analyze_image_with_openai_vision(image_data, custom_prompt)
+    
+    return result
 
 
 def analyze_image_with_qwen(image_data, custom_prompt=""):
@@ -244,6 +285,53 @@ Follow WCAG guidelines. Output JSON:
         print(f"❌ Error in Qwen image analysis: {e}")
         traceback.print_exc()
         return {"error": str(e)}
+
+
+@app.route("/test-blip", methods=["GET"])
+def test_blip():
+    """Test BLIP API with a simple image"""
+    try:
+        HF_API_TOKEN = os.getenv("HF_API_TOKEN")
+        if not HF_API_TOKEN:
+            return jsonify({"error": "HF_API_TOKEN not set"})
+        
+        # Create a simple test image (small white square)
+        test_image_base64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+        
+        result = analyze_image_with_blip_api(test_image_base64)
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+@app.route("/test-hf-api", methods=["GET"])
+def test_hf_api():
+    """Test Hugging Face API token validity"""
+    try:
+        HF_API_TOKEN = os.getenv("HF_API_TOKEN")
+        if not HF_API_TOKEN:
+            return jsonify({"error": "HF_API_TOKEN not set"})
+        
+        # Test the token with a simple API call
+        headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
+        response = requests.get("https://huggingface.co/api/whoami", headers=headers)
+        
+        if response.status_code == 200:
+            user_info = response.json()
+            return jsonify({
+                "token_valid": True,
+                "user": user_info.get("name", "Unknown"),
+                "message": "Token is valid, BLIP API should work"
+            })
+        else:
+            return jsonify({
+                "token_valid": False,
+                "error": f"Token validation failed: {response.status_code}"
+            })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 
 @app.route("/debug/build", methods=["GET"])
