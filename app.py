@@ -26,100 +26,38 @@ print(f"✅ Base URL: {QWEN_BASE_URL}")
 llm = None
 browser_use_available = False
 
-# === BLIP via Hugging Face API ===
-import requests
+# === BLIP Model Setup ===
+from transformers import BlipProcessor, BlipForConditionalGeneration
+import torch
 
-def analyze_image_with_blip_api(image_data, custom_prompt=""):
+blip_processor, blip_model = None, None
+
+def load_blip():
+    global blip_processor, blip_model
     try:
-        HF_API_TOKEN = os.getenv("HF_API_TOKEN")
-        if not HF_API_TOKEN:
-            return {"error": "Hugging Face API token not configured"}
-
-        # Try multiple working models in order of preference
-        models_to_try = [
-            "nlpconnect/vit-gpt2-image-captioning",  # Usually more reliable
-            "Salesforce/blip-image-captioning-base",
-            "microsoft/DialoGPT-medium"
-        ]
-
-        if image_data.startswith("data:image"):
-            image_data_clean = image_data.split(",")[1]
-            image_format = image_data.split(",")[0].split("/")[1].split(";")[0]
-        else:
-            image_data_clean = image_data
-            image_format = "unknown"
-
-        image_bytes = base64.b64decode(image_data_clean)
-        file_size_kb = len(image_bytes) / 1024
+        print("📦 Loading BLIP model...")
         
-        # Get image dimensions
-        image = Image.open(io.BytesIO(image_bytes))
-        width, height = image.size
-        dimensions = f"{width}x{height}"
-
-        # Try each model until one works
-        last_error = None
-        for model_name in models_to_try:
-            try:
-                API_URL = f"https://api-inference.huggingface.co/models/{model_name}"
-                headers = {
-                    "Authorization": f"Bearer {HF_API_TOKEN}",
-                    "Content-Type": "application/octet-stream"
-                }
-
-                print(f"Trying model: {model_name}")
-                response = requests.post(API_URL, headers=headers, data=image_bytes, timeout=30)
-                
-                print(f"Response status: {response.status_code}")
-                print(f"Response text: {response.text[:200]}...")
-                
-                if response.status_code == 200:
-                    result_data = response.json()
-                    
-                    # Handle different response formats
-                    if isinstance(result_data, list) and len(result_data) > 0:
-                        caption = result_data[0].get('generated_text', 'No caption generated')
-                    elif isinstance(result_data, dict):
-                        caption = result_data.get('generated_text', 'No caption generated')
-                    else:
-                        caption = str(result_data)
-                        
-                    # Success! Return the result
-                    return {
-                        "alt_text": caption,
-                        "explanation": f"Generated using {model_name} via Hugging Face API",
-                        "success": True,
-                        "dimensions": dimensions,
-                        "size_kb": round(file_size_kb, 1),
-                        "format": image_format,
-                        "model_used": model_name
-                    }
-                    
-                elif response.status_code == 503:
-                    last_error = f"Model {model_name} is loading, trying next model..."
-                    print(last_error)
-                    continue
-                    
-                elif response.status_code == 401:
-                    return {"error": "Invalid Hugging Face API token"}
-                    
-                else:
-                    last_error = f"Model {model_name}: {response.status_code} - {response.text}"
-                    print(last_error)
-                    continue
-                    
-            except Exception as e:
-                last_error = f"Error with model {model_name}: {str(e)}"
-                print(last_error)
-                continue
-
-        # If we get here, all models failed
-        return {"error": f"All models failed. Last error: {last_error}"}
-
+        # Use CPU to reduce memory usage
+        device = "cpu"  # Force CPU for Railway deployment
+        
+        blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+        blip_model = BlipForConditionalGeneration.from_pretrained(
+            "Salesforce/blip-image-captioning-base",
+            torch_dtype=torch.float32,  # Use float32 for CPU
+            low_cpu_mem_usage=True
+        )
+        blip_model.to(device)
+        blip_model.eval()  # Set to evaluation mode
+        
+        print("✅ BLIP model loaded successfully on CPU")
+        return True
     except Exception as e:
-        print(f"❌ Error in BLIP API image analysis: {e}")
+        print(f"❌ Failed to load BLIP model: {e}")
         traceback.print_exc()
-        return {"error": str(e)}
+        return False
+
+# Load BLIP model on startup
+blip_loaded = load_blip()
 
 
 class BrowserUseCompatibleLLM:
@@ -218,15 +156,54 @@ async def analyze_url(url, custom_prompt=""):
 
 
 def analyze_image_with_blip(image_data, custom_prompt=""):
-    # Try Hugging Face first, fallback to OpenAI if available
-    result = analyze_image_with_blip_api(image_data, custom_prompt)
+    """BLIP image captioning using local model"""
+    global blip_processor, blip_model
     
-    # If HF fails and OpenAI key is available, try OpenAI
-    if "error" in result and os.getenv("OPENAI_API_KEY"):
-        print("Hugging Face failed, trying OpenAI Vision...")
-        return analyze_image_with_openai_vision(image_data, custom_prompt)
-    
-    return result
+    try:
+        if not blip_loaded or not blip_processor or not blip_model:
+            return {"error": "BLIP model not loaded. Please check server logs."}
+
+        if image_data.startswith("data:image"):
+            image_data_clean = image_data.split(",")[1]
+            image_format = image_data.split(",")[0].split("/")[1].split(";")[0]
+        else:
+            image_data_clean = image_data
+            image_format = "unknown"
+
+        image_bytes = base64.b64decode(image_data_clean)
+        file_size_kb = len(image_bytes) / 1024
+        
+        # Get image dimensions
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        width, height = image.size
+        dimensions = f"{width}x{height}"
+
+        print(f"📸 Processing image with BLIP: {dimensions}, {file_size_kb:.1f}KB")
+
+        # Process with BLIP
+        device = "cpu"
+        inputs = blip_processor(image, return_tensors="pt").to(device)
+        
+        with torch.no_grad():
+            out = blip_model.generate(**inputs, max_length=50, do_sample=False)
+            caption = blip_processor.decode(out[0], skip_special_tokens=True)
+
+        print(f"🎯 Generated caption: {caption}")
+
+        return {
+            "alt_text": caption,
+            "explanation": "Generated using BLIP image captioning model",
+            "success": True,
+            "dimensions": dimensions,
+            "size_kb": round(file_size_kb, 1),
+            "format": image_format,
+            "provider": "Local BLIP Model"
+        }
+
+    except Exception as e:
+        print(f"❌ Error in BLIP image analysis: {e}")
+        traceback.print_exc()
+        return {"error": f"BLIP processing error: {str(e)}"}
 
 
 def analyze_image_with_qwen(image_data, custom_prompt=""):
@@ -287,75 +264,6 @@ Follow WCAG guidelines. Output JSON:
         return {"error": str(e)}
 
 
-@app.route("/test-blip", methods=["GET"])
-def test_blip():
-    """Test BLIP API with a simple image"""
-    try:
-        HF_API_TOKEN = os.getenv("HF_API_TOKEN")
-        if not HF_API_TOKEN:
-            return jsonify({"error": "HF_API_TOKEN not set"})
-        
-        # Create a simple test image (small white square)
-        test_image_base64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
-        
-        result = analyze_image_with_blip_api(test_image_base64)
-        return jsonify(result)
-        
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
-
-@app.route("/test-hf-api", methods=["GET"])
-def test_hf_api():
-    """Test Hugging Face API token validity"""
-    try:
-        HF_API_TOKEN = os.getenv("HF_API_TOKEN")
-        if not HF_API_TOKEN:
-            return jsonify({"error": "HF_API_TOKEN not set"})
-        
-        # Test the token with a simple API call
-        headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
-        response = requests.get("https://huggingface.co/api/whoami", headers=headers)
-        
-        if response.status_code == 200:
-            user_info = response.json()
-            return jsonify({
-                "token_valid": True,
-                "user": user_info.get("name", "Unknown"),
-                "message": "Token is valid, BLIP API should work"
-            })
-        else:
-            return jsonify({
-                "token_valid": False,
-                "error": f"Token validation failed: {response.status_code}"
-            })
-        
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
-
-@app.route("/debug/build", methods=["GET"])
-def debug_build():
-    """Debug route to check build directory contents"""
-    build_folder = "alt-tag-generator/build"
-    try:
-        if os.path.exists(build_folder):
-            files = []
-            for root, dirs, filenames in os.walk(build_folder):
-                for filename in filenames:
-                    rel_path = os.path.relpath(os.path.join(root, filename), build_folder)
-                    files.append(rel_path)
-            return jsonify({
-                "build_exists": True,
-                "files": files[:20],  # First 20 files
-                "total_files": len(files)
-            })
-        else:
-            return jsonify({"build_exists": False, "error": "Build folder not found"})
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
-
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
@@ -363,8 +271,34 @@ def health():
         "browser_use": browser_use_available,
         "llm_initialized": bool(llm),
         "model": QWEN_MODEL,
-        "hf_api_available": bool(os.getenv("HF_API_TOKEN"))
+        "blip_available": blip_loaded,
+        "blip_model": "Salesforce/blip-image-captioning-base",
+        "deployment": "Railway"
     })
+
+
+@app.route("/test-blip", methods=["GET"])
+def test_blip():
+    """Test BLIP model with a simple image"""
+    try:
+        if not blip_loaded:
+            return jsonify({"error": "BLIP model not loaded"})
+        
+        # Simple test image (small white square)
+        test_image_base64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+        
+        print("🧪 Testing BLIP with test image...")
+        result = analyze_image_with_blip(test_image_base64)
+        
+        return jsonify({
+            "test_result": result,
+            "blip_loaded": blip_loaded,
+            "model": "Salesforce/blip-image-captioning-base",
+            "provider": "Local BLIP on Railway"
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 
 @app.route("/analyze-url", methods=["POST"])
@@ -387,18 +321,40 @@ def api_analyze_image():
     data = request.get_json()
     image_data = data.get("image")
     custom_prompt = data.get("prompt", "")
-    llm_choice = data.get("llm", "blip")  # default = blip
+    llm_choice = data.get("llm", "blip")  # Always use BLIP by default
+    
     if not image_data:
         return jsonify({"error": "Image data is required"}), 400
 
-    if llm_choice == "qwen":
-        result = analyze_image_with_qwen(image_data, custom_prompt)
-    else:
-        result = analyze_image_with_blip(image_data, custom_prompt)
+    # Always use BLIP for image analysis
+    print(f"🔄 Processing image with BLIP...")
+    result = analyze_image_with_blip(image_data, custom_prompt)
 
     if "error" in result:
         return jsonify(result), 500
     return jsonify(result)
+
+
+@app.route("/debug/build", methods=["GET"])
+def debug_build():
+    """Debug route to check build directory contents"""
+    build_folder = "alt-tag-generator/build"
+    try:
+        if os.path.exists(build_folder):
+            files = []
+            for root, dirs, filenames in os.walk(build_folder):
+                for filename in filenames:
+                    rel_path = os.path.relpath(os.path.join(root, filename), build_folder)
+                    files.append(rel_path)
+            return jsonify({
+                "build_exists": True,
+                "files": files[:20],  # First 20 files
+                "total_files": len(files)
+            })
+        else:
+            return jsonify({"build_exists": False, "error": "Build folder not found"})
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 
 # Updated static file serving for React build
@@ -434,6 +390,6 @@ def serve(path):
 
 
 if __name__ == "__main__":
-    print("🚀 Starting server...")
+    print("🚀 Starting server on Railway...")
     port = int(os.environ.get("PORT", 5001))
-    app.run(host="0.0.0.0", port=port, debug=False)  # Set debug=False for production
+    app.run(host="0.0.0.0", port=port, debug=False)
