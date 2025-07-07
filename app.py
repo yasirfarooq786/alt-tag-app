@@ -35,14 +35,25 @@ blip_processor, blip_model = None, None
 def load_blip():
     global blip_processor, blip_model
     try:
-        blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-        blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+        # Load model on-demand with caching
+        cache_dir = os.environ.get('TRANSFORMERS_CACHE', '/tmp/transformers_cache')
+        blip_processor = BlipProcessor.from_pretrained(
+            "Salesforce/blip-image-captioning-base",
+            cache_dir=cache_dir
+        )
+        blip_model = BlipForConditionalGeneration.from_pretrained(
+            "Salesforce/blip-image-captioning-base",
+            cache_dir=cache_dir,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            low_cpu_mem_usage=True
+        )
         print("✅ BLIP model loaded successfully")
     except Exception as e:
         print(f"❌ Failed to load BLIP model: {e}")
         traceback.print_exc()
 
-load_blip()
+# Load model lazily on first request instead of at startup
+# load_blip()
 
 
 class BrowserUseCompatibleLLM:
@@ -75,18 +86,23 @@ def initialize_browser_use():
         llm_proxy = BrowserUseCompatibleLLM(chat)
         print("✅ LLM initialized with browser-use compatible wrapper")
 
-        from browser_use import Agent
-        test_agent = Agent(
-            task="Test browser-use initialization",
-            llm=llm_proxy,
-            headless=True   # 👈 prevent opening new browser window
-        )
-        browser_use_available = True
-        print("✅ browser-use Agent initialized")
+        try:
+            from browser_use import Agent
+            test_agent = Agent(
+                task="Test browser-use initialization",
+                llm=llm_proxy,
+                headless=True   # 👈 prevent opening new browser window
+            )
+            browser_use_available = True
+            print("✅ browser-use Agent initialized")
+        except ImportError:
+            print("⚠️ browser-use not available, URL analysis disabled")
+            browser_use_available = False
+        
         return llm_proxy
 
     except Exception as e:
-        print(f"❌ Failed to initialize browser-use: {e}")
+        print(f"❌ Failed to initialize LLM: {e}")
         traceback.print_exc()
         return None
 
@@ -108,9 +124,12 @@ def run_async(coro):
 async def analyze_url(url, custom_prompt=""):
     try:
         if not llm or not browser_use_available:
-            return {"error": "LLM or browser-use not initialized"}
+            return {"error": "Browser automation not available in this deployment. Please use image upload instead."}
 
-        from browser_use import Agent
+        try:
+            from browser_use import Agent
+        except ImportError:
+            return {"error": "Browser automation not available in this deployment. Please use image upload instead."}
 
         task = f"""
         Visit {url} and check all images for accessibility.
@@ -133,7 +152,13 @@ async def analyze_url(url, custom_prompt=""):
 
 
 def analyze_image_with_blip(image_data, custom_prompt=""):
+    global blip_processor, blip_model
     try:
+        # Load model on first use if not already loaded
+        if not blip_processor or not blip_model:
+            print("Loading BLIP model on demand...")
+            load_blip()
+            
         if not blip_processor or not blip_model:
             return {"error": "BLIP model not loaded"}
 
