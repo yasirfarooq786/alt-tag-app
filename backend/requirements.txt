@@ -1,0 +1,13 @@
+Flask==3.0.0
+Flask-CORS==4.0.0
+python-dotenv==1.0.0
+browser-use==0.1.4
+langchain-openai==0.1.19
+langchain-core==0.2.38
+Pillow==10.1.0
+gunicorn==21.2.0
+playwright==1.40.0
+requests==2.31.0
+pydantic==2.5.3
+transformers>=4.38
+torch>=2.0
