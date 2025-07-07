@@ -26,34 +26,66 @@ print(f"✅ Base URL: {QWEN_BASE_URL}")
 llm = None
 browser_use_available = False
 
-# === BLIP imports ===
-from transformers import BlipProcessor, BlipForConditionalGeneration
-import torch
+# === BLIP via Hugging Face API ===
+import requests
 
-blip_processor, blip_model = None, None
-
-def load_blip():
-    global blip_processor, blip_model
+def analyze_image_with_blip_api(image_data, custom_prompt=""):
     try:
-        # Load model on-demand with caching
-        cache_dir = os.environ.get('TRANSFORMERS_CACHE', '/tmp/transformers_cache')
-        blip_processor = BlipProcessor.from_pretrained(
-            "Salesforce/blip-image-captioning-base",
-            cache_dir=cache_dir
-        )
-        blip_model = BlipForConditionalGeneration.from_pretrained(
-            "Salesforce/blip-image-captioning-base",
-            cache_dir=cache_dir,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            low_cpu_mem_usage=True
-        )
-        print("✅ BLIP model loaded successfully")
-    except Exception as e:
-        print(f"❌ Failed to load BLIP model: {e}")
-        traceback.print_exc()
+        HF_API_TOKEN = os.getenv("HF_API_TOKEN")
+        if not HF_API_TOKEN:
+            return {"error": "Hugging Face API token not configured"}
 
-# Load model lazily on first request instead of at startup
-# load_blip()
+        API_URL = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-base"
+        headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
+
+        if image_data.startswith("data:image"):
+            image_data_clean = image_data.split(",")[1]
+            image_format = image_data.split(",")[0].split("/")[1].split(";")[0]
+        else:
+            image_data_clean = image_data
+            image_format = "unknown"
+
+        image_bytes = base64.b64decode(image_data_clean)
+        file_size_kb = len(image_bytes) / 1024
+        
+        # Get image dimensions
+        image = Image.open(io.BytesIO(image_bytes))
+        width, height = image.size
+        dimensions = f"{width}x{height}"
+
+        # Call Hugging Face API
+        response = requests.post(API_URL, headers=headers, data=image_bytes, timeout=30)
+        
+        if response.status_code == 200:
+            result_data = response.json()
+            
+            # Handle different response formats
+            if isinstance(result_data, list) and len(result_data) > 0:
+                caption = result_data[0].get('generated_text', 'No caption generated')
+            elif isinstance(result_data, dict):
+                caption = result_data.get('generated_text', 'No caption generated')
+            else:
+                caption = "Unable to generate caption"
+                
+        elif response.status_code == 503:
+            return {"error": "Model is loading, please try again in a few minutes"}
+        else:
+            return {"error": f"API error: {response.status_code} - {response.text}"}
+
+        result = {
+            "alt_text": caption,
+            "explanation": "Generated using BLIP via Hugging Face API",
+            "success": True,
+            "dimensions": dimensions,
+            "size_kb": round(file_size_kb, 1),
+            "format": image_format
+        }
+        return result
+
+    except Exception as e:
+        print(f"❌ Error in BLIP API image analysis: {e}")
+        traceback.print_exc()
+        return {"error": str(e)}
 
 
 class BrowserUseCompatibleLLM:
@@ -152,50 +184,8 @@ async def analyze_url(url, custom_prompt=""):
 
 
 def analyze_image_with_blip(image_data, custom_prompt=""):
-    global blip_processor, blip_model
-    try:
-        # Load model on first use if not already loaded
-        if not blip_processor or not blip_model:
-            print("Loading BLIP model on demand...")
-            load_blip()
-            
-        if not blip_processor or not blip_model:
-            return {"error": "BLIP model not loaded"}
-
-        if image_data.startswith("data:image"):
-            image_data_clean = image_data.split(",")[1]
-            image_format = image_data.split(",")[0].split("/")[1].split(";")[0]
-        else:
-            image_data_clean = image_data
-            image_format = "unknown"
-
-        image_bytes = base64.b64decode(image_data_clean)
-        file_size_kb = len(image_bytes) / 1024
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        width, height = image.size
-        dimensions = f"{width}x{height}"
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        blip_model.to(device)
-
-        inputs = blip_processor(image, return_tensors="pt").to(device)
-        out = blip_model.generate(**inputs, max_length=50)
-        caption = blip_processor.decode(out[0], skip_special_tokens=True)
-
-        result = {
-            "alt_text": caption,
-            "explanation": "Generated using BLIP image captioning",
-            "success": True,
-            "dimensions": dimensions,
-            "size_kb": round(file_size_kb, 1),
-            "format": image_format
-        }
-        return result
-
-    except Exception as e:
-        print(f"❌ Error in BLIP image analysis: {e}")
-        traceback.print_exc()
-        return {"error": str(e)}
+    # Use Hugging Face API instead of local model
+    return analyze_image_with_blip_api(image_data, custom_prompt)
 
 
 def analyze_image_with_qwen(image_data, custom_prompt=""):
@@ -263,7 +253,7 @@ def health():
         "browser_use": browser_use_available,
         "llm_initialized": bool(llm),
         "model": QWEN_MODEL,
-        "blip_loaded": blip_model is not None
+        "hf_api_available": bool(os.getenv("HF_API_TOKEN"))
     })
 
 
