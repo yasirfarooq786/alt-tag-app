@@ -13,7 +13,7 @@ from PIL import Image
 # Load env
 load_dotenv()
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='alt-tag-generator/build', static_url_path='')
 CORS(app)
 
 QWEN_API_KEY = os.getenv("QWEN_API_KEY")
@@ -246,6 +246,28 @@ Follow WCAG guidelines. Output JSON:
         return {"error": str(e)}
 
 
+@app.route("/debug/build", methods=["GET"])
+def debug_build():
+    """Debug route to check build directory contents"""
+    build_folder = "alt-tag-generator/build"
+    try:
+        if os.path.exists(build_folder):
+            files = []
+            for root, dirs, filenames in os.walk(build_folder):
+                for filename in filenames:
+                    rel_path = os.path.relpath(os.path.join(root, filename), build_folder)
+                    files.append(rel_path)
+            return jsonify({
+                "build_exists": True,
+                "files": files[:20],  # First 20 files
+                "total_files": len(files)
+            })
+        else:
+            return jsonify({"build_exists": False, "error": "Build folder not found"})
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
@@ -302,12 +324,25 @@ def serve(path):
     if not os.path.exists(build_folder):
         return jsonify({"error": "React build not found. Run npm run build first."}), 404
     
-    # Serve specific files if they exist
-    if path != "" and os.path.exists(os.path.join(build_folder, path)):
+    # Handle static files specifically
+    if path.startswith('static/'):
+        static_file_path = os.path.join(build_folder, path)
+        if os.path.exists(static_file_path):
+            return send_from_directory(build_folder, path)
+        else:
+            return jsonify({"error": f"Static file not found: {path}"}), 404
+    
+    # Handle other specific files (manifest.json, favicon.ico, etc.)
+    elif path and os.path.exists(os.path.join(build_folder, path)):
         return send_from_directory(build_folder, path)
+    
+    # For all other routes, serve index.html (React Router)
     else:
-        # Serve index.html for all other routes (React Router)
-        return send_from_directory(build_folder, "index.html")
+        index_path = os.path.join(build_folder, "index.html")
+        if os.path.exists(index_path):
+            return send_from_directory(build_folder, "index.html")
+        else:
+            return jsonify({"error": "React app index.html not found"}), 404
 
 
 if __name__ == "__main__":
