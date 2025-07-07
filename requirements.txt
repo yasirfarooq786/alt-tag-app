@@ -1,8 +1,8 @@
 Flask==3.0.0
 Flask-CORS==4.0.0
 python-dotenv==1.0.0
-langchain-openai==0.1.19
-langchain-core==0.2.38
+langchain-openai==0.2.5
+langchain-core==0.3.0
 Pillow==10.1.0
 gunicorn==21.2.0
 requests==2.31.0
