@@ -3,11 +3,8 @@ Flask-CORS==4.0.0
 python-dotenv==1.0.1
 Pillow==10.1.0
 gunicorn==21.2.0
-transformers==4.38.0
-torch
-torchvision
-torchaudio
 requests>=2.32.3
+replicate==0.25.1
 pydantic>=2.9.2
 langchain-openai>=0.2.5
 langchain-core>=0.3.15
