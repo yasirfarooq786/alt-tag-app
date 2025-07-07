@@ -276,26 +276,17 @@ def api_analyze_image():
     return jsonify(result)
 
 
-# Updated static file serving for React build
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def serve(path):
-    # Serve React build files from alt-tag-generator/build
-    build_folder = "alt-tag-generator/build"
-    
-    # Check if the build folder exists
-    if not os.path.exists(build_folder):
-        return jsonify({"error": "React build not found. Run npm run build first."}), 404
-    
-    # Serve specific files if they exist
-    if path != "" and os.path.exists(os.path.join(build_folder, path)):
-        return send_from_directory(build_folder, path)
+    static_folder = app.static_folder or "static"
+    if path and os.path.exists(os.path.join(static_folder, path)):
+        return send_from_directory(static_folder, path)
     else:
-        # Serve index.html for all other routes (React Router)
-        return send_from_directory(build_folder, "index.html")
+        return send_from_directory(static_folder, "index.html")
 
 
 if __name__ == "__main__":
     print("🚀 Starting server...")
     port = int(os.environ.get("PORT", 5001))
-    app.run(host="0.0.0.0", port=port, debug=False)  # Set debug=False for production
+    app.run(host="0.0.0.0", port=port, debug=True)
